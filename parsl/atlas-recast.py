@@ -1,17 +1,16 @@
-from parsl import App, DataFlowKernel
-from parsl.app.app import bash_app, python_app
-# from parsl.configs.local_threads import config
-
+import parsl.data_provider.files
+from parsl import App
 from parsl.config import Config
 from parsl.executors.ipp import IPyParallelExecutor
 from parsl.providers import KubernetesProvider
-from parsl.data_provider.files import File
-import os.path
 
+# Config for two kubernetes executors. One for each step, each with their own
+# docker image. We also mount a shared volume into the steps so they can
+# communicate with each other via a single file system.
 config = Config(
     executors=[
         IPyParallelExecutor(
-            label='pool_app1',
+            label='event_selection',
             provider=KubernetesProvider(
                 image="bengal1/reana-demo-atlas-recast-eventselection:latest",
                 nodes_per_block=1,
@@ -22,7 +21,7 @@ config = Config(
             )
         ),
         IPyParallelExecutor(
-            label='pool_app2',
+            label='stat_analysis',
             provider=KubernetesProvider(
                 image="bengal1/reana-demo-atlas-recast-statanalysis",
                 nodes_per_block=1,
@@ -36,11 +35,12 @@ config = Config(
     lazy_errors=False
 )
 
-dfk = DataFlowKernel(config=config)
-
-
-@App('bash', dfk, executors=['pool_app1'], cache=True)
-def app_2(did, name, xsec_in_pb, dxaod_file, submitDir, lumi_in_ifb, stdout="/data/app2.out", stderr="/data/app2.err"):
+# event_selection task
+@App('bash', executors=['event_selection'], cache=True)
+def event_selection(did, name, xsec_in_pb, dxaod_file, submitDir, lumi_in_ifb,
+                    stdout="/data/event_selection.out",
+                    stderr="/data/event_selection.err",
+                    outputs=[]):
     return '''
 source /home/atlas/release_setup.sh
 source /analysis/build/x86*/setup.sh
@@ -54,8 +54,12 @@ myEventSelection %s recast_inputs.txt recast_xsecs.txt %f
         ''' % (did, name, xsec_in_pb, dxaod_file, submitDir, lumi_in_ifb)
 
 
-@App('bash', dfk, executors=['pool_app2'], cache=True)
-def app_3(data_file, signal_file, background_file, resultdir, stdout="/data/app3.out", stderr="/data/app3.err" ):
+# Statistical Analysis Task
+@App('bash', executors=['stat_analysis'], cache=True)
+def stat_analyis(data_file, signal_file, background_file, resultdir,
+                 stdout="/data/stat_analyis.out",
+                 stderr="/data/stat_analyis.err",
+                 inputs=[], outputs=[]):
     return  '''
 source /home/atlas/release_setup.sh
 python /data/code/make_ws.py %(data_file)s %(signal_file)s %(background_file)s
@@ -71,22 +75,21 @@ python /data/code/set_limit.py %(result_dir)s/meas_combined_meas_model.root \
         "result_dir": resultdir
     }
 
-app_future = app_2("404958", "recast_sample", 0.00122,
-                   dxaod_file="https://recastwww.web.cern.ch/recastwww/data/reana-recast-demo/mc15_13TeV.123456.cap_recast_demo_signal_one.root",
-                   submitDir="/data/submitDir",
-                   lumi_in_ifb=30.0                   )
+parsl.load(config)
+
+sample_file = parsl.File("/data/submitDir/hist-sample.root")
+post_file = parsl.File("/data/results//post.png")
+event_selection_future = event_selection("404958", "recast_sample", 0.00122,
+                                         dxaod_file="https://recastwww.web.cern.ch/recastwww/data/reana-recast-demo/mc15_13TeV.123456.cap_recast_demo_signal_one.root",
+                                         submitDir="/data/submitDir",
+                                         lumi_in_ifb=30.0,
+                                         outputs=[sample_file])
+
+stat_analysis_future = stat_analyis("/data/data.root", "/data/submitDir/hist-sample.root",
+                           "/data/background.root", "/data/results",
+                                    inputs=event_selection_future.outputs,
+                                    outputs=[post_file])
 
 
-
-# Check if the app_future is resolved
-print ('Done1: %s' % app_future.done())
-
-# Print the result of the app_future. Note: this
-# call will block and wait for the future to resolve
-print ('Result1: %s' % app_future.result())
-
-app_future2 = app_3("/data/data.root", "/data/submitDir/hist-sample.root", "/data/background.root", "/data/results")
-print ('Done2: %s' % app_future2.done())
-
-print ('Result2: %s' % app_future2.result())
-print ('Done: %s' % app_future.done())
+# Check if the result file is ready
+print ('Done: %s' % stat_analysis_future.outputs[0].done())
