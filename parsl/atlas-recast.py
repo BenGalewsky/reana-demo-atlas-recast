@@ -93,3 +93,4 @@ stat_analysis_future = stat_analyis("/data/data.root", "/data/submitDir/hist-sam
 
 # Check if the result file is ready
 print ('Done: %s' % stat_analysis_future.outputs[0].done())
+print('result is '+str(stat_analysis_future.outputs[0].result()))
